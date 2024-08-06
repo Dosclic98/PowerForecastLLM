@@ -2,3 +2,5 @@ seaborn
 pandas
 numpy
 matplotlib
+astral
+scikit-learn
