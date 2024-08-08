@@ -1,3 +1,5 @@
 # Files and folders to ignore
 data
 .venv
+lag-llama
+.vscode
