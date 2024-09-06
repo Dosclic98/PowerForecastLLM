@@ -4,3 +4,5 @@ numpy
 matplotlib
 astral
 scikit-learn
+auto_mix_prep==0.2.0
+tensorflow==2.13.0
