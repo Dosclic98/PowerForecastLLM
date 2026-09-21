@@ -5,3 +5,5 @@ data
 GTT
 lag-llama
 .vscode
+__pycache__
+results
