@@ -1,7 +1,0 @@
-{
-  "scheduled_origins": 145,
-  "complete_origins": 145,
-  "excluded_origins": 0,
-  "context": 168,
-  "policy": "exclude any missing input or target; shared origins for every model"
-}
