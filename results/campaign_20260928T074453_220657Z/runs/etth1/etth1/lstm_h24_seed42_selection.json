@@ -1,0 +1,61 @@
+{
+  "validation_protocol": "single chronological early-stopping holdout; full-development refit",
+  "selection_metric": "early_stopping_mae",
+  "seed": 42,
+  "horizon": 24,
+  "configuration": {
+    "hidden_size": 128,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "context": 168,
+    "layers": 2,
+    "dropout": 0.3,
+    "output_mode": "last",
+    "train_batch_size": 64
+  },
+  "epoch_selection_split": {
+    "fold": 1,
+    "fit_train_end": 12480,
+    "fit_valid_end": 13920,
+    "validation_blocks": 1
+  },
+  "epoch_selection": {
+    "training_seconds": 4.380632302025333,
+    "best_epoch": 4,
+    "validation_mae": 1.1785023212432861,
+    "early_stopping_mae": 1.1785025220208922,
+    "selected_train_mae": 1.812122106552124,
+    "validation_seasonal_naive_mae": 1.49854576587677,
+    "validation_persistence_mae": 1.1587021350860596,
+    "validation_block_mae_std": null,
+    "train_end_exclusive": 12480,
+    "validation_end_exclusive": 13920,
+    "train_windows": 12289,
+    "epochs_run": 9,
+    "refit_full": false,
+    "hit_epoch_limit": false,
+    "parameters": 202264
+  },
+  "refit_epochs": 4,
+  "refit_epoch_rule": "best epoch on the single early-stopping holdout",
+  "final_fit": {
+    "training_seconds": 1.9814894839655608,
+    "best_epoch": 4,
+    "validation_mae": null,
+    "early_stopping_mae": null,
+    "selected_train_mae": 1.7154182195663452,
+    "validation_seasonal_naive_mae": null,
+    "validation_persistence_mae": null,
+    "validation_block_mae_std": null,
+    "train_end_exclusive": 13920,
+    "validation_end_exclusive": 13920,
+    "train_windows": 13729,
+    "epochs_run": 4,
+    "refit_full": true,
+    "hit_epoch_limit": false,
+    "parameters": 202264
+  },
+  "test_used_for_selection": false,
+  "test_start": 13920,
+  "checkpoint": "lstm_h24_seed42.pt"
+}
