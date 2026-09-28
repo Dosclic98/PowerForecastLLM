@@ -1,2 +1,0 @@
-block,role,scheduled_origins,excluded_origins,mae,seasonal_naive_mae,persistence_mae,origins,first_origin,last_target_exclusive
-0,early_stopping,8,5,0.6203182339668274,0.791600227355957,0.9993593692779541,3,26376,27552
