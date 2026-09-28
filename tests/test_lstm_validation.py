@@ -111,9 +111,42 @@ class LSTMValidationTests(unittest.TestCase):
                     checkpoint = torch.load(Path(directory) / 'lstm_h4_seed42.pt', weights_only=True)
                     np.testing.assert_allclose(checkpoint['mean'], values[:72].mean(axis=0))
                     self.assertEqual(checkpoint['output_mode'], mode)
+                    self.assertEqual(checkpoint['dropout_placement'], 'between_lstm_layers')
+                    self.assertEqual(checkpoint['effective_dropout'], .2)
                     self.assertEqual(info['train_windows'], 45)
                     self.assertTrue(np.isfinite(info['selected_train_mae']))
                     self.assertIsNone(info['validation_block_mae_std'])
+
+    def test_interlayer_dropout_and_single_layer_override(self):
+        torch.set_num_threads(1)
+        values = np.random.default_rng(2).normal(size=(64, 2)).astype(np.float32)
+        args = b.parse_args(['--context', '24', '--hidden-size', '4', '--epochs', '1'])
+        original_lstm = torch.nn.LSTM
+        for layers in (1, 2):
+            encoders = []
+
+            def build_encoder(*args, **kwargs):
+                encoder = original_lstm(*args, **kwargs)
+                encoders.append(encoder)
+                return encoder
+
+            config = argparse.Namespace(**{**vars(args), 'layers': layers, 'weight_decay': 0.,
+                                           'dropout': .3, 'output_mode': 'last', 'refit_full': True,
+                                           'fit_train_end': 64, 'fit_valid_end': 64})
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.object(torch.nn, 'LSTM', side_effect=build_encoder), \
+                    patch.object(torch.nn, 'Dropout', side_effect=AssertionError('output dropout must be absent')):
+                predict, info = b.fit_lstm_candidate(values, 4, config, 'cpu', 42, Path(directory))
+                self.assertEqual(encoders[0].dropout, .3 if layers == 2 else 0.)
+                self.assertEqual(info['effective_dropout'], encoders[0].dropout)
+                x = values[-24:][None].copy()
+                np.testing.assert_array_equal(predict(x, 4), predict(x, 4))
+                if layers == 2:
+                    encoders[0].train()
+                    with torch.no_grad():
+                        first = encoders[0](torch.from_numpy(x))[0]
+                        second = encoders[0](torch.from_numpy(x))[0]
+                    self.assertFalse(torch.equal(first, second))
 
     def test_single_holdout_selects_epoch_then_refits_full_development(self):
         torch.set_num_threads(1)

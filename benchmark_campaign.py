@@ -66,6 +66,7 @@ def plan(args, settings):
             'validation_protocol': 'single_holdout' if settings.cv_folds == 1 else 'expanding_window_cv',
             'validation_fits_per_configuration': settings.cv_folds,
             'lstm_configurations': engine.lstm_grid(settings) if 'lstm' in settings.models else [],
+            'lstm_dropout_placement': 'between_lstm_layers',
             'electricity_clients': list(dict.fromkeys(args.clients or DEFAULT_CLIENTS)) if 'electricity' in args.datasets else [],
             'refit': ('full development period; epochs = best holdout epoch' if settings.cv_folds == 1 else
                       'full development period; epochs = ceiling of median best CV epoch'),
@@ -90,7 +91,7 @@ def main(argv=None):
         raise ValueError('Toto 2 requires Python 3.12+; use the benchmark environment.')
     output = (args.output or Path('results') / datetime.now(timezone.utc).strftime('campaign_%Y%m%dT%H%M%S_%fZ')).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    manifest = {'status': 'preparing', 'protocol_version': 3, 'plan': budget,
+    manifest = {'status': 'preparing', 'protocol_version': 4, 'plan': budget,
                 'settings': vars(settings), 'forwarded_arguments': forwarded, 'jobs': [],
                 'code_sha256': {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                 for name in ('benchmark_campaign.py', 'campaign_datasets.py',

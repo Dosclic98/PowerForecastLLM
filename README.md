@@ -134,7 +134,7 @@ folds; each fold has a separate inner stopping tail. Explicit parameter searches
 require `--cv-folds` of at least 2. Only that optional mode uses mean outer-fold
 MAE and the ceiling of median best fold epochs for final refitting.
 
-MASE uses all development data. This is campaign protocol 3; existing results
+MASE uses all development data. This is campaign protocol 4; existing results
 remain unchanged. The standalone ETTh1 runner retains its 20-month timeline
 (30-day months), using 16 development months and four test months. The campaign
 uses the full record. Engine `--split-ends` accepts two exclusive endpoints:
@@ -155,8 +155,8 @@ The same default configuration is used for every dataset, customer and horizon:
 - Hidden size: **128 per layer**.
 - Learning rate: **0.001**.
 - Layers: **2**.
-- Dropout: **0.3**, applied to the final hidden representation before the linear
-  forecasting head, not between recurrent layers.
+- Dropout: **0.3 between the two LSTM layers**. No dropout before the linear
+  forecasting head. A one-layer override disables inter-layer dropout.
 - Weight decay: **0**.
 - Output mode: **last** (predict a residual relative to the last target value).
 - Context: the requested **`--context`**, with no automatic context search.
@@ -187,7 +187,7 @@ history on its latest observation and predicts an additive change; the other
 channels retain training-only global scaling. These overrides permit further controlled comparisons. The default `last` mode
 is supported by earlier validation results, but its CV performance still needs evaluation. Contexts must fit within
 `--context`; inference crops inputs to the selected LSTM context and records it
-in metrics. Dropout applies to the final hidden state even with one layer.
+in metrics. Dropout applies between stacked layers and is inactive with a single layer.
 
 ## Diagnostics and interpretation
 

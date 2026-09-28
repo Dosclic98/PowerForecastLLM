@@ -28,7 +28,7 @@ metrics.csv also contains *_window_mean and *_window_std for MAE, RMSE and MASE.
 Defaults: seven historical input variables, oil-temperature (OT) evaluation,
 512 hours of context, horizon 24, daily test origins, one reproducibility seed (42).
 The default LSTM is fixed: hidden size 128 per layer, two layers, learning rate
-0.001, dropout 0.3 before the output head, zero weight decay, output mode last,
+0.001, inter-layer dropout 0.3, zero weight decay, output mode last,
 and the requested --context. By default, fit on development data excluding its
 last 720 hours, using that chronological holdout for early stopping. Then initialize
 a fresh model and train on ALL development data for the best holdout epoch count.
@@ -144,7 +144,7 @@ def parse_args(argv=None):
                         help="Optional context search; default: only --context.")
     parser.add_argument("--lstm-layers", nargs="+", type=int)
     parser.add_argument("--lstm-dropouts", nargs="+", type=float, default=[0.3],
-                        help="Dropout on the final hidden state (also active with one layer).")
+                        help="Dropout between LSTM layers; inactive with one layer. No output-head dropout.")
     parser.add_argument("--lstm-output-modes", nargs="+", choices=["direct", "last"], default=["last"],
                         help="last centers the target on its last observed value and predicts a residual.")
     parser.add_argument("--lstm-batch-sizes", nargs="+", type=int)
@@ -426,8 +426,8 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
     class ForecastLSTM(nn.Module):
         def __init__(self):
             super().__init__()
-            self.encoder = nn.LSTM(values.shape[1], args.hidden_size, args.layers, batch_first=True)
-            self.dropout = nn.Dropout(args.dropout)
+            self.encoder = nn.LSTM(values.shape[1], args.hidden_size, args.layers, batch_first=True,
+                                   dropout=args.dropout if args.layers > 1 else 0.0)
             self.head = nn.Linear(args.hidden_size, horizon)
 
         def forward(self, x):
@@ -436,7 +436,7 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
                 x = x.clone()
                 x[:, :, 0] = x[:, :, 0] - offset
             _, (hidden, _) = self.encoder(x)
-            return self.head(self.dropout(hidden[-1])) + offset
+            return self.head(hidden[-1]) + offset
 
     model = ForecastLSTM().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -523,7 +523,8 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
                 "context": args.context, "horizon": horizon, "hidden_size": args.hidden_size,
                 "layers": args.layers, "learning_rate": args.learning_rate,
                 "weight_decay": args.weight_decay, "best_epoch": best_epoch,
-                "dropout": args.dropout, "output_mode": args.output_mode,
+                "dropout": args.dropout, "dropout_placement": "between_lstm_layers",
+                "effective_dropout": model.encoder.dropout, "output_mode": args.output_mode,
                 "validation_blocks": len(blocks), "refit_full": refit_full,
                 "train_end_exclusive": train_end, "validation_end_exclusive": valid_end,
                 "early_stopping_mae": stopping_mae,
@@ -536,6 +537,7 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
             return model(tensor).cpu().numpy() * target_std + target_mean
 
     return predict, {"training_seconds": train_seconds, "best_epoch": best_epoch,
+                     "dropout_placement": "between_lstm_layers", "effective_dropout": model.encoder.dropout,
                      "validation_mae": selection_mae,
                      "early_stopping_mae": stopping_mae,
                      "selected_train_mae": selected_train_mae,
