@@ -84,15 +84,15 @@ Campaign output contains:
   `series_mean`/`series_std` describe the per-customer means with equal customer
   weights. For single-series datasets, series std is undefined.
 - `per_series_metrics.csv`: all successful per-series results, including pooled
-  RMSE, window mean/std, timings and LSTM diagnostics.
-- `resource_summary.csv`: mean/std across series for training/setup/inference
-  time and throughput, including all successful runs.
+  RMSE, window mean/std, timings, repetition IDs and LSTM workload diagnostics.
+- `resource_summary.csv`: mean/std across series within each repetition for
+  training/setup/inference time and throughput, including all successful runs.
 - `coverage.csv`: every requested series/model/horizon and whether it completed.
 - `runs/DATASET/SERIES/`: predictions, per-origin metrics, CV results, checkpoints,
   hardware/package details, and individual error/coverage reports.
 
 For each dataset/horizon, comparison summaries use only customers with results
-for **all requested models**, so a failed model cannot silently change the
+for **all requested models and repetitions**, so a failed run cannot silently change the
 comparison cohort. Requested/completed/eligible counts are explicit. Undefined
 MASE values are excluded and metric-specific counts are reported. Standard
 deviations use `ddof=1`, are blank for fewer than two observations, and describe
@@ -107,6 +107,72 @@ without rerunning models with:
 ```bash
 .venv-benchmark/bin/python benchmark_campaign.py --summarize results/my_campaign
 ```
+
+## Repeated training and setup measurements
+
+Use `--repeats 10` to perform ten fresh fits/setups for every model, series and
+horizon. For the current multivariate experiment:
+
+```bash
+.venv-benchmark/bin/python benchmark_campaign.py \
+  --download --device cuda --input-mode multivariate \
+  --context 336 --early-stopping-hours 1440 --repeats 10
+```
+
+The default remains one repetition. Ten repetitions mean **480 LSTM fits**
+(12 series × 2 horizons × 2 fits × 10 repetitions) and **1,200 model evaluations**
+for all five models. `--plan --repeats 10` previews the budget without execution.
+
+Every repetition uses the **same seed**, fixed configuration, split and forecast
+windows. It retrains both LSTM stages from scratch and recreates each pretrained
+adapter, reloads its weights, warms it up, and evaluates forecasts. This measures
+repeatability of timing at a controlled workload, not variability across seeds.
+Repetitions are sequential in the same process for each series. No library,
+filesystem or checkpoint cache is flushed: initial imports/downloads can make the
+first setup slower. Per-repetition measurements are retained for inspection.
+
+- `per_series_metrics.csv` has one row per series/model/horizon/**repeat**.
+- `repeat_summary.csv` reports mean/sample std **across repetitions**, separately
+  for each series/model/horizon. Filter `metric` to `training_seconds` or
+  `setup_seconds_including_training` for the requested timing statistics. It also
+  summarizes accuracy and workload counts. Completed/requested repeat counts are
+  explicit; a single successful repeat has undefined std.
+- `dataset_summary.csv` and `resource_summary.csv` retain window/customer
+  statistics separately **within each repeat**.
+- `dataset_repeat_summary.csv` summarizes dataset-level mean accuracy and latency
+  across repetitions. `statistic=mean` uses pooled windows; `series_mean` uses
+  equal customer weights. These std values differ from window/customer std.
+- With multiple repeats, raw forecasts, checkpoints and selection diagnostics go
+  under `runs/DATASET/SERIES/repeat_01/`, `repeat_02/`, etc. A single repeat keeps
+  the original layout. Each series' `summary/repeat_summary.csv` also reports its
+  repetition statistics.
+
+Dataset comparisons use a common customer cohort across all requested models
+**and repetitions**. A missing repetition is recorded in `coverage.csv`; its
+customer is excluded from that horizon's dataset comparisons. Individual
+successful measurements remain available in `repeat_summary.csv`.
+
+LSTM workload columns are stored in `metrics.csv`, the combined per-series CSV,
+and the selection JSON:
+
+| Column | Meaning |
+|---|---|
+| `initial_train_windows` | Valid optimization windows in the initial fit, excluding the holdout |
+| `refit_train_windows` | Valid windows in the final full-development refit |
+| `initial_epochs_run` | All epochs executed, including patience epochs after the best epoch |
+| `refit_epochs` | Epochs executed during final refitting |
+| `initial_training_batches`, `refit_training_batches` | Actual optimizer batches processed in each stage |
+| `total_training_batches` | Optimizer batches across both stages |
+| `total_early_stopping_batches` | Validation batches processed while deciding when to stop |
+| `total_fit_batches` | Optimizer plus early-stopping batches across both stages |
+| `total_training_window_presentations` | Training examples processed, counting repeated epochs |
+
+Partial batches count as one batch. Unique window counts are reported per stage;
+the initial and final window sets overlap, so their sum is not a unique-data count.
+Batch counters exclude post-fit diagnostic scoring and test inference, which are
+outside the optimization/early-stopping `training_seconds` timer. For optional
+multi-fold CV, totals include **all** candidate/fold fits plus the final refit;
+`selection_training_batches` reports candidate/fold optimizer batches.
 
 ## LSTM early stopping and full-development refit
 
@@ -134,7 +200,7 @@ folds; each fold has a separate inner stopping tail. Explicit parameter searches
 require `--cv-folds` of at least 2. Only that optional mode uses mean outer-fold
 MAE and the ceiling of median best fold epochs for final refitting.
 
-MASE uses all development data. This is campaign protocol 4; existing results
+MASE uses all development data. This is campaign protocol 5; existing results
 remain unchanged. The standalone ETTh1 runner retains its 20-month timeline
 (30-day months), using 16 development months and four test months. The campaign
 uses the full record. Engine `--split-ends` accepts two exclusive endpoints:

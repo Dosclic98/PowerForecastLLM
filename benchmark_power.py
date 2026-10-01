@@ -53,7 +53,7 @@ def main(argv=None):
     ends = split_ends(len(hourly))
     if model_args.lstm_plan:
         planned = engine.parse_args(['--split-ends', *map(str, ends), *forwarded])
-        per_series = (len(engine.lstm_grid(planned)) * planned.cv_folds + 1) * len(planned.horizons)
+        per_series = (len(engine.lstm_grid(planned)) * planned.cv_folds + 1) * len(planned.horizons) * planned.repeats
         print(json.dumps({'dataset': args.dataset, 'series': series, 'series_count': len(series),
                           'lstm_fits_per_series': per_series, 'total_lstm_fits': per_series * len(series),
                           'folds': engine.cross_validation_folds(planned),
@@ -82,7 +82,10 @@ def main(argv=None):
         if metrics:
             combined = pd.concat(metrics, ignore_index=True)
             combined.to_csv(output / 'per_series_metrics.csv', index=False)
-            keys = ['dataset', 'model', 'horizon', 'seed']
+            from repetition_reporting import REPEAT_METRICS, repetition_summary
+            repetition_summary(combined, ['dataset', 'series', 'model', 'horizon', 'seed'],
+                               REPEAT_METRICS, model_args.repeats).to_csv(output / 'repeat_summary.csv', index=False)
+            keys = ['dataset', 'model', 'horizon', 'seed', 'repeat']
             summary = combined.groupby(keys, dropna=False).agg(
                 mae=('mae', 'mean'), rmse=('rmse', 'mean'), mase=('mase', 'mean'),
                 completed_series=('series', 'nunique'), mase_series=('mase', 'count')).reset_index()

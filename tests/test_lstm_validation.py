@@ -68,7 +68,9 @@ class LSTMValidationTests(unittest.TestCase):
             score = ([1., 9.][config.fold - 1] if config.hidden_size == 4 else 4.) if hasattr(config, 'fold') else 20.
             return config.hidden_size, dict(validation_mae=score if not getattr(config, "refit_full", False) else None, training_seconds=1,
                                            best_epoch=config.fold + 1 if hasattr(config, "fold") else config.epochs,
-                                           validation_seasonal_naive_mae=6., validation_persistence_mae=5.)
+                                           validation_seasonal_naive_mae=6., validation_persistence_mae=5.,
+                                           training_batches=2, early_stopping_batches=1, fit_batches=3,
+                                           training_window_presentations=8, train_windows=4)
 
         with tempfile.TemporaryDirectory() as directory, patch.object(b, 'fit_lstm_candidate', fake_fit):
             predict, info = b.train_lstm(values, 24, args, 'cpu', 42, Path(directory))

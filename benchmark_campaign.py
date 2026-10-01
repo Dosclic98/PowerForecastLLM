@@ -70,10 +70,11 @@ def plan(args, settings):
             'electricity_clients': list(dict.fromkeys(args.clients or DEFAULT_CLIENTS)) if 'electricity' in args.datasets else [],
             'refit': ('full development period; epochs = best holdout epoch' if settings.cv_folds == 1 else
                       'full development period; epochs = ceiling of median best CV epoch'),
-            'mase_lag': settings.season, 'seed': settings.seeds[0],
-            'model_evaluations': sum(counts.values()) * len(settings.models) * len(settings.horizons),
-            'lstm_fits_per_series_per_horizon': fits,
-            'total_lstm_fits': fits * sum(counts.values()) * len(settings.horizons),
+            'mase_lag': settings.season, 'seed': settings.seeds[0], 'repeats': settings.repeats,
+            'model_evaluations': sum(counts.values()) * len(settings.models) * len(settings.horizons) * settings.repeats,
+            'lstm_fits_per_series_per_horizon_per_repeat': fits,
+            'lstm_fits_per_series_per_horizon': fits * settings.repeats,
+            'total_lstm_fits': fits * sum(counts.values()) * len(settings.horizons) * settings.repeats,
             'smoke_test': settings.max_origins is not None}
 
 
@@ -91,11 +92,11 @@ def main(argv=None):
         raise ValueError('Toto 2 requires Python 3.12+; use the benchmark environment.')
     output = (args.output or Path('results') / datetime.now(timezone.utc).strftime('campaign_%Y%m%dT%H%M%S_%fZ')).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    manifest = {'status': 'preparing', 'protocol_version': 4, 'plan': budget,
+    manifest = {'status': 'preparing', 'protocol_version': 5, 'plan': budget,
                 'settings': vars(settings), 'forwarded_arguments': forwarded, 'jobs': [],
                 'code_sha256': {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                 for name in ('benchmark_campaign.py', 'campaign_datasets.py',
-                                             'campaign_reporting.py', 'benchmark_etth1.py', 'power_datasets.py')}}
+                                             'campaign_reporting.py', 'repetition_reporting.py', 'benchmark_etth1.py', 'power_datasets.py')}}
     engine.write_json(output / 'campaign.json', manifest)
     try:
         series, sources = prepare_series(args.datasets, args.data_dir, args.etth1_data,

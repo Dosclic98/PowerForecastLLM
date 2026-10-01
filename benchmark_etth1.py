@@ -19,11 +19,14 @@ Examples:
     python benchmark_etth1.py --summarize results/etth1_RUN_DIRECTORY
 
 summary/ contains per-origin accuracy and mean/std across origins for each run.
-Each trained LSTM has its own row; seeds are never pooled. Standard deviations use
+Each repetition has its own row; --repeats repeats fresh setups/fits with a fixed seed. Standard deviations use
 ddof=1 and are undefined for a single observation. Overlapping forecast windows
 are correlated: these descriptive standard deviations are not confidence intervals.
 Mean window RMSE differs from the pooled RMSE retained in metrics.csv.
 metrics.csv also contains *_window_mean and *_window_std for MAE, RMSE and MASE.
+summary/repeat_summary.csv reports run-level timing/accuracy mean/std across
+repetitions. LSTM counts record optimization batches, stopping batches, and valid
+training windows in the initial fit and final refit. Setup caches are not flushed.
 
 Defaults: seven historical input variables, oil-temperature (OT) evaluation,
 512 hours of context, horizon 24, daily test origins, one reproducibility seed (42).
@@ -123,7 +126,9 @@ def parse_args(argv=None):
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--threads", type=int, default=4, help="PyTorch CPU thread count.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42],
-                        help="One reproducibility seed for CV and final fitting (default: 42).")
+                        help="One seed reused for every fresh training repetition (default: 42).")
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="Fresh setup/training repetitions per model/horizon, using the same seed (default: 1).")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -168,7 +173,7 @@ def parse_args(argv=None):
         parser.error("The first feature column must be the target.")
     if args.input_mode == "univariate":
         args.feature_columns = [args.target]
-    positive = ["context", "stride", "season", "batch_size", "warmup", "threads", "epochs",
+    positive = ["repeats", "context", "stride", "season", "batch_size", "warmup", "threads", "epochs",
                 "patience", "hidden_size", "layers", "train_batch_size", "train_stride", "cv_folds", "cv_stop_hours"]
     if any(getattr(args, key) <= 0 for key in positive) or any(h <= 0 for h in args.horizons):
         parser.error("Lengths, counts, horizons and strides must be positive.")
@@ -209,7 +214,7 @@ def parse_args(argv=None):
             parser.error("The initial CV block must fit context, horizon and --cv-stop-hours; "
                          "use fewer folds, a shorter stopping tail or more development data.")
     if len(set(args.seeds)) != 1:
-        parser.error("Use one --seeds value: configuration selection now uses chronological CV, not multiple seeds.")
+        parser.error("Use one --seeds value; --repeats repeats fresh fitting with that fixed seed.")
     if "lstm" in args.models and args.cv_folds == 1 and len(lstm_grid(args)) != 1:
         parser.error("Single-holdout training requires one fixed LSTM configuration; "
                      "use --cv-folds >=2 to opt into a parameter search.")
@@ -442,6 +447,7 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     loss_fn = nn.L1Loss()
     best_loss, best_state, stale, best_epoch = float("inf"), None, 0, 0
+    training_batches = early_stopping_batches = training_window_presentations = 0
     history = []
     synchronize(device)
     begin = time.perf_counter()
@@ -455,6 +461,8 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            training_batches += 1
+            training_window_presentations += len(x)
             train_total += loss.item() * len(x)
         if not np.isfinite(train_total):
             raise ValueError("LSTM training loss became non-finite.")
@@ -468,6 +476,7 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
         valid_total = 0.0
         with torch.inference_mode():
             for x, y in valid:
+                early_stopping_batches += 1
                 valid_total += loss_fn(model(x.to(device)), y.to(device)).item() * len(x)
         valid_loss = valid_total / len(valid.dataset)
         if not np.isfinite(valid_loss):
@@ -515,10 +524,16 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
     selection_mae = float(np.mean([b["mae"] for b in selection_scores])) if selection_scores else None
     stopping_mae = None if refit_full else best_loss * target_std
     selected_train_mae = score(train_origins)["mae"]
+    workload = {"train_windows": len(train_origins), "train_batches_per_epoch": len(train),
+                "training_batches": training_batches, "early_stopping_batches": early_stopping_batches,
+                "fit_batches": training_batches + early_stopping_batches,
+                "training_window_presentations": training_window_presentations,
+                "early_stopping_windows": len(blocks[0]) if blocks else 0,
+                "epochs_run": len(history)}
     pd.DataFrame(block_scores, columns=["block", "role", "scheduled_origins", "excluded_origins",
                                        "mae", "seasonal_naive_mae", "persistence_mae", "origins",
                                        "first_origin", "last_target_exclusive"]).to_csv(output / f"lstm_h{horizon}_seed{seed}_validation.csv", index=False)
-    torch.save({"state_dict": best_state, "mean": mean.tolist(), "std": std.tolist(), "seed": seed,
+    torch.save({**workload, "state_dict": best_state, "mean": mean.tolist(), "std": std.tolist(), "seed": seed,
                 "input_size": values.shape[1], "features": args.feature_columns[:values.shape[1]], "target": args.target,
                 "context": args.context, "horizon": horizon, "hidden_size": args.hidden_size,
                 "layers": args.layers, "learning_rate": args.learning_rate,
@@ -536,7 +551,7 @@ def fit_lstm_candidate(values, horizon, args, device, seed, output):
             tensor = torch.from_numpy((x[:, -args.context:] - mean) / std).to(device)
             return model(tensor).cpu().numpy() * target_std + target_mean
 
-    return predict, {"training_seconds": train_seconds, "best_epoch": best_epoch,
+    return predict, {**workload, "training_seconds": train_seconds, "best_epoch": best_epoch,
                      "dropout_placement": "between_lstm_layers", "effective_dropout": model.encoder.dropout,
                      "validation_mae": selection_mae,
                      "early_stopping_mae": stopping_mae,
@@ -565,6 +580,18 @@ def cross_validation_folds(args):
             for i, (start, end) in enumerate(zip(edges[:-1], edges[1:]))]
 
 
+def training_workload(selection_fits, final_fit):
+    """Aggregate optimization/early-stopping work, without calling reused windows unique."""
+    records = [*selection_fits, final_fit]
+    counts = {}
+    for key in ("training_batches", "early_stopping_batches", "fit_batches", "training_window_presentations"):
+        counts[f"total_{key}"] = sum(fit[key] for fit in records)
+    counts.update(selection_training_batches=sum(fit["training_batches"] for fit in selection_fits),
+                  refit_training_batches=final_fit["training_batches"],
+                  refit_train_windows=final_fit["train_windows"])
+    return counts
+
+
 def train_lstm_holdout(values, horizon, args, device, seed, output):
     """Select an epoch on one trailing holdout, then refit all development data."""
     configs = lstm_grid(args)
@@ -591,14 +618,19 @@ def train_lstm_holdout(values, horizon, args, device, seed, output):
     predict, final_info = fit_lstm_candidate(development, horizon, final_args, device, seed, output)
     synchronize(device)
     elapsed = time.perf_counter() - begin
+    workload = training_workload([epoch_info], final_info)
+    workload.update(initial_train_windows=epoch_info["train_windows"],
+                    initial_training_batches=epoch_info["training_batches"],
+                    initial_epochs_run=epoch_info["epochs_run"])
     write_json(output / f"{label}_selection.json", {
+        "workload": workload,
         "validation_protocol": "single chronological early-stopping holdout; full-development refit",
         "selection_metric": "early_stopping_mae", "seed": seed, "horizon": horizon,
         "configuration": config, "epoch_selection_split": split, "epoch_selection": epoch_info,
         "refit_epochs": refit_epochs, "refit_epoch_rule": "best epoch on the single early-stopping holdout",
         "final_fit": final_info, "test_used_for_selection": False, "test_start": args.valid_end,
         "checkpoint": f"{label}.pt"})
-    return predict, {**config, **final_info, "refit_epochs": refit_epochs,
+    return predict, {**config, **final_info, **workload, "refit_epochs": refit_epochs,
                      "validation_protocol": "single_holdout", "cv_folds": 0,
                      "epoch_selection_mae": epoch_info["early_stopping_mae"],
                      "epoch_selection_train_end": split["fit_train_end"],
@@ -661,7 +693,8 @@ def train_lstm(values, horizon, args, device, seed, output):
     predict, final_info = fit_lstm_candidate(development_values, horizon, final_args, device, seed, output)
     synchronize(device)
     tuning_seconds = time.perf_counter() - begin
-    selection = {"selection_metric": "cv_mae", "seed": seed, "horizon": horizon,
+    workload = training_workload(fold_results, final_info)
+    selection = {"workload": workload, "selection_metric": "cv_mae", "seed": seed, "horizon": horizon,
                  "trial_count": len(trials), "selected": best_info, "folds": folds,
                  "validation_protocol": "optional expanding training over development; inner early stopping; mean outer-fold MAE",
                  "refit_epoch_rule": "ceiling of median best epoch across winning configuration CV folds",
@@ -670,7 +703,7 @@ def train_lstm(values, horizon, args, device, seed, output):
                  "test_used_for_selection": False, "test_start": args.valid_end,
                  "checkpoint": f"{label}.pt"}
     write_json(output / f"{label}_selection.json", selection)
-    info = {**best_info, **final_info,
+    info = {**best_info, **final_info, **workload,
             "selected_training_seconds": final_info["training_seconds"],
             "training_seconds": sum(t["training_seconds"] for t in trials) + final_info["training_seconds"],
             "tuning_seconds": tuning_seconds, "tuning_trials": len(trials),
@@ -739,14 +772,19 @@ def summarize_run(directory):
     import numpy as np
     import pandas as pd
 
+    from repetition_reporting import REPEAT_METRICS, repetition_summary
+
     runs = pd.read_csv(directory / "metrics.csv")
+    if "repeat" not in runs:
+        runs["repeat"] = 1
     windows = []
     for row_index, run in runs.iterrows():
         horizon = int(run.horizon)
         label = f"{run.model}_h{horizon}"
         if pd.notna(run.seed):
             label += f"_seed{int(run.seed)}"
-        predictions = pd.read_csv(directory / f"{label}_predictions.csv")
+        artifact_directory = run.get("artifact_directory", ".")
+        predictions = pd.read_csv(directory / artifact_directory / f"{label}_predictions.csv")
         if not np.isfinite(predictions[["actual", "prediction"]].to_numpy()).all():
             raise ValueError(f"Non-finite forecasts in {label}.")
         error = predictions.prediction.astype(float) - predictions.actual.astype(float)
@@ -768,11 +806,11 @@ def summarize_run(directory):
         stats = window_statistics({key: per_origin[key].to_numpy() for key in ["mae", "rmse", "mase"]})
         for key, value in stats.items():
             runs.at[row_index, key] = value if value is not None else np.nan
-        per_origin = per_origin.reset_index().assign(model=run.model, seed=run.seed, horizon=horizon)
+        per_origin = per_origin.reset_index().assign(model=run.model, seed=run.seed, horizon=horizon, repeat=int(run["repeat"]))
         windows.append(per_origin)
     windows = pd.concat(windows, ignore_index=True)
     measures = ["mae", "rmse", "mase"]
-    window_summary = windows.groupby(["model", "horizon", "seed"], dropna=False)[measures].agg(
+    window_summary = windows.groupby(["model", "horizon", "seed", "repeat"], dropna=False)[measures].agg(
         ["count", "mean", "std"])
     window_summary.columns = [f"{metric}_window_{stat}" for metric, stat in window_summary.columns]
     output = directory / "summary"
@@ -780,12 +818,17 @@ def summarize_run(directory):
     windows.to_csv(output / "per_origin_metrics.csv", index=False)
     window_summary.to_csv(output / "window_summary.csv")
     runs.to_csv(directory / "metrics.csv", index=False)
+    metadata_path = directory / "run.json"
+    requested = json.loads(metadata_path.read_text())["arguments"].get("repeats", 1) if metadata_path.exists() else int(runs["repeat"].max())
+    repetition_summary(runs, ["model", "horizon", "seed"], REPEAT_METRICS, requested).to_csv(
+        output / "repeat_summary.csv", index=False)
     (output / "README.txt").write_text(
         "per_origin_metrics.csv: each metric is computed across the forecast horizon at one origin.\n"
-        "window_summary.csv: mean and sample std across origins, separately for each model/horizon/seed.\n"
+        "window_summary.csv: mean and sample std across origins, separately for each model/horizon/seed/repetition.\n"
         "Mean window RMSE is not pooled RMSE; metrics.csv retains pooled RMSE.\n"
         "metrics.csv includes *_window_mean and *_window_std for MAE, RMSE and MASE.\n"
-        "Each fitted LSTM is reported separately; seed is an identifier only. No across-seed statistics are computed.\n"
+        "repeat_summary.csv: mean/sample std of run-level metrics across fresh setups/fits with a fixed seed.\n"
+        "Workload counts distinguish optimization batches and early-stopping batches; post-fit diagnostics are excluded.\n"
         "Window std is available for every model with at least two forecast origins.\n"
         "New runs also record mean/std batch latency in metrics.csv. Old latency std cannot be reconstructed.\n"
         "All std use ddof=1. Windows may overlap and be serially correlated; std are descriptive, not confidence intervals.\n"
@@ -801,9 +844,10 @@ def main(argv=None):
     if args.lstm_plan:
         grid = lstm_grid(args)
         print(json.dumps({"configurations_per_horizon": len(grid),
-                          "validation_fits": len(grid) * len(args.horizons) * args.cv_folds,
-                          "final_fits": len(args.horizons),
-                          "total_fits": (len(grid) * args.cv_folds + 1) * len(args.horizons),
+                          "repeats": args.repeats,
+                          "validation_fits": len(grid) * len(args.horizons) * args.cv_folds * args.repeats,
+                          "final_fits": len(args.horizons) * args.repeats,
+                          "total_fits": (len(grid) * args.cv_folds + 1) * len(args.horizons) * args.repeats,
                           "maximum_epochs_per_fit": args.epochs,
                           "folds": cross_validation_folds(args), "grid": grid}, indent=2))
         return 0
@@ -853,6 +897,8 @@ def main(argv=None):
                                 "test": [str(dates[args.valid_end]), str(dates[args.test_end - 1])]},
                 "pretraining_overlap": "Not audited; frozen inference does not establish unseen data.",
                 "timing": "Warm adapter latency, CPU NumPy input/output, synchronized CUDA; excludes loading/training.",
+                "repetition_policy": "fresh setup/fit, fixed seed and test windows; sequential in one process per series",
+                "setup_timing": "includes model loading and LSTM fitting; caches/imports may be warm after first repetition; no cache flushing",
                 "smoke_test": args.max_origins is not None, "status": "running"}
     write_json(output / "run.json", metadata)
     rows, errors = [], []
@@ -871,9 +917,13 @@ def main(argv=None):
             origins = origins[:args.max_origins]
         x, y = make_windows(values, origins, args.context, horizon)
         for name in args.models:
-            for seed in args.seeds if name == "lstm" else [None]:
+            for repeat in range(1, args.repeats + 1):
+                seed = args.seeds[0] if name == "lstm" else None
+                artifact_directory = f"repeat_{repeat:02d}" if args.repeats > 1 else "."
+                run_output = output / artifact_directory
+                run_output.mkdir(exist_ok=True)
                 label = f"{name}_h{horizon}" + (f"_seed{seed}" if seed is not None else "")
-                print(f"Running {label}: {len(origins)} origins", flush=True)
+                print(f"Running {label} repetition {repeat}/{args.repeats}: {len(origins)} origins", flush=True)
                 predict = None
                 try:
                     model_device = "cpu" if name == "seasonal-naive" else device
@@ -883,29 +933,29 @@ def main(argv=None):
                     if name == "seasonal-naive":
                         predict = seasonal_naive
                     elif name == "lstm":
-                        predict, info = train_lstm(values, horizon, args, device, seed, output)
+                        predict, info = train_lstm(values, horizon, args, device, seed, run_output)
                     else:
                         predict = foundation_adapter(name, device, args.batch_size)
                     synchronize(model_device)
                     setup_seconds = time.perf_counter() - begin
                     pred, timing = benchmark(predict, x, horizon, model_device, args.batch_size, args.warmup)
                     metrics = accuracy(y, pred, values[:args.valid_end, 0], args.season)
-                    row = {"model": name, "seed": seed, "horizon": horizon, "context": args.context,
+                    row = {"repeat": repeat, "artifact_directory": artifact_directory, "model": name, "seed": seed, "horizon": horizon, "context": args.context,
                            "origins": len(origins), "batch_size": args.batch_size, "device": model_device,
                            "input_mode": "univariate" if name == "seasonal-naive" else args.input_mode,
                            "input_features": 1 if name == "seasonal-naive" else values.shape[1],
                            "setup_seconds_including_training": setup_seconds, **info, **metrics, **timing}
-                    rows.append(row)
-                    pd.DataFrame(rows).to_csv(output / "metrics.csv", index=False)
                     indices = origins[:, None] + np.arange(horizon)
                     pd.DataFrame({"origin": np.repeat(dates.iloc[origins].to_numpy(), horizon),
                                   "timestamp": dates.to_numpy()[indices].ravel(),
                                   "lead_hour": np.tile(np.arange(1, horizon + 1), len(origins)),
                                   "actual": y.ravel(), "prediction": pred.ravel()}).to_csv(
-                                      output / f"{label}_predictions.csv", index=False)
+                                      run_output / f"{label}_predictions.csv", index=False)
+                    rows.append(row)
+                    pd.DataFrame(rows).to_csv(output / "metrics.csv", index=False)
                     print(f"  MAE={metrics['mae']:.5f} RMSE={metrics['rmse']:.5f}", flush=True)
                 except Exception as exc:
-                    error = {"run": label, "error": f"{type(exc).__name__}: {exc}"}
+                    error = {"run": label, "repeat": repeat, "error": f"{type(exc).__name__}: {exc}"}
                     errors.append(error)
                     write_json(output / "errors.json", errors)
                     print(f"  FAILED: {error['error']}", file=sys.stderr, flush=True)
